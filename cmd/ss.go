@@ -39,23 +39,27 @@ func runSS(cmd *cobra.Command, args []string) {
 
 	passwords := generatePasswords(numUsers)
 
+	// Shadowrocket 用的 method 名
+	ssMethod := "aes-256-gcm"
+
 	for i := 0; i < numUsers; i++ {
 		port := basePort + i
 		userID := i + 1
 		pw := passwords[i]
 		go startSS(port, userID, method, pw)
+
+		// 生成 ss:// 一键导入链接
+		raw := fmt.Sprintf("%s:%s", ssMethod, pw)
+		encoded := base64.StdEncoding.EncodeToString([]byte(raw))
+		ssURL := fmt.Sprintf("ss://%s@%s:%d#hidexx-user%d", encoded, localIP, port, userID)
+
 		fmt.Printf("  user %d:\n", userID)
-		fmt.Printf("    address:  %s\n", localIP)
-		fmt.Printf("    port:     %d\n", port)
-		fmt.Printf("    method:   %s\n", method)
-		fmt.Printf("    password: %s\n", pw)
+		fmt.Printf("    one-click URL: %s\n", ssURL)
 		fmt.Println()
 	}
 
-	fmt.Println("Shadowrocket config:")
-	fmt.Println("  Type: Shadowsocks")
-	fmt.Println("  Algorithm: aes-256-gcm")
-	fmt.Println("  Address/Port/Password: see above")
+	fmt.Println("usage: copy the URL above, open in Safari/browser on phone")
+	fmt.Println("       Shadowrocket will auto-import the config")
 	fmt.Println()
 	fmt.Println("server running...")
 
