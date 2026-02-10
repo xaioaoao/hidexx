@@ -202,7 +202,8 @@ func refreshOne(store *subStore, index int, lineID string) error {
 	if err := c.ClaimFreeTrial(lineID); err != nil {
 		return fmt.Errorf("claim: %w", err)
 	}
-	log.Printf("%s claim success", tag)
+	log.Printf("%s claim success, waiting 10s for subscription to be provisioned...", tag)
+	time.Sleep(10 * time.Second)
 
 	subs, err := c.GetSubscriptions()
 	if err != nil {
