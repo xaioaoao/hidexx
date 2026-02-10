@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Hidexx 架构图</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<style>
+  body { background: #0d1117; color: #e6edf3; font-family: -apple-system, sans-serif; padding: 40px; }
+  h1 { text-align: center; font-size: 28px; margin-bottom: 8px; }
+  h2 { text-align: center; font-size: 16px; color: #8b949e; font-weight: normal; margin-bottom: 40px; }
+  .diagram { display: flex; justify-content: center; margin-bottom: 50px; }
+  .section-title { font-size: 20px; margin: 40px 0 20px; border-bottom: 1px solid #30363d; padding-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<h1>Hidexx 自动白嫖代理系统</h1>
+<h2>每天自动注册 → OCR 破解验证码 → 领取试用 → 分发订阅，手机配一次永久有效</h2>
+
+<div class="section-title">🏗️ 系统架构</div>
+<div class="diagram">
+<pre class="mermaid">
+graph TB
+    subgraph HIDEXX["🖥️ Mac · hidexx serve :51991"]
+        direction TB
+        CRON["⏰ 定时器<br/>每 20 小时触发"]
+        REG["📝 注册模块<br/>随机邮箱 + 密码"]
+        OCR["🔍 OCR 模块<br/>tesseract 识别验证码<br/>失败自动重试"]
+        CLAIM["🎁 领取模块<br/>解析 sid/checksum<br/>POST 领取免费试用"]
+        FETCH["📥 订阅拉取<br/>下载 Clash YAML ≈38KB"]
+        STORE["💾 内存存储<br/>最新节点配置"]
+        HTTP["🌐 HTTP Server<br/>GET /sub.yaml"]
+
+        CRON --> REG --> OCR --> CLAIM --> FETCH --> STORE --> HTTP
+    end
+
+    SITE["☁️ a.hidexx.com<br/>代理节点提供商"]
+    SUB_SITE["☁️ sub.51trojan.com<br/>订阅配置服务"]
+
+    REG -- "POST /users/register" --> SITE
+    OCR -- "GET /users/vcode" --> SITE
+    CLAIM -- "POST /orders/request_day_trial" --> SITE
+    FETCH -- "GET /v1/sub/.../xxx.yaml" --> SUB_SITE
+
+    IPHONE["📱 iPhone<br/>Shadowrocket"]
+    IPAD["📱 iPad<br/>Clash"]
+    FRIEND["📱 朋友的手机<br/>任意客户端"]
+
+    HTTP -- "http://192.168.x.x:51991/sub.yaml" --> IPHONE
+    HTTP -- "同一 WiFi" --> IPAD
+    HTTP -- "同一 WiFi" --> FRIEND
+
+    style HIDEXX fill:#161b22,stroke:#58a6ff,stroke-width:2px,color:#e6edf3
+    style SITE fill:#1a1e24,stroke:#f97583,stroke-width:1px,color:#e6edf3
+    style SUB_SITE fill:#1a1e24,stroke:#f97583,stroke-width:1px,color:#e6edf3
+    style IPHONE fill:#1a1e24,stroke:#56d364,stroke-width:2px,color:#e6edf3
+    style IPAD fill:#1a1e24,stroke:#56d364,stroke-width:1px,color:#e6edf3
+    style FRIEND fill:#1a1e24,stroke:#56d364,stroke-width:1px,color:#e6edf3
+    style CRON fill:#21262d,stroke:#8b949e,color:#e6edf3
+    style REG fill:#21262d,stroke:#8b949e,color:#e6edf3
+    style OCR fill:#21262d,stroke:#d29922,color:#e6edf3
+    style CLAIM fill:#21262d,stroke:#8b949e,color:#e6edf3
+    style FETCH fill:#21262d,stroke:#8b949e,color:#e6edf3
+    style STORE fill:#21262d,stroke:#58a6ff,color:#e6edf3
+    style HTTP fill:#21262d,stroke:#58a6ff,color:#e6edf3
+</pre>
+</div>
+
+<div class="section-title">🔄 每日自动续命流程</div>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+    participant T as ⏰ 定时器
+    participant H as 🖥️ hidexx
+    participant S as ☁️ hidexx.com
+    participant O as 🔍 tesseract
+    participant Sub as ☁️ 订阅服务
+    participant P as 📱 手机
+
+    T->>H: 触发 (每20h)
+
+    Note over H: 生成随机邮箱+密码
+
+    H->>S: GET /users/vcode
+    S-->>H: 验证码图片 (PNG)
+
+    H->>O: OCR 识别
+    O-->>H: "T4K6" (4位字符)
+
+    alt OCR 结果不是4位
+        H->>S: 重新 GET /users/vcode
+        Note over H,O: 重试，最多10次
+    end
+
+    H->>S: POST /users/register (email + pass + 验证码)
+    S-->>H: 302 → /users/ucenter (注册成功，自动登录)
+
+    H->>S: GET /users/ucenter
+    S-->>H: HTML (含 sid + checksum)
+
+    H->>S: POST /orders/request_day_trial (sid + checksum + line_id)
+    S-->>H: 领取成功！
+
+    H->>S: GET /users/ucenter
+    S-->>H: HTML (含 copyText 订阅URL)
+
+    H->>Sub: GET /v1/sub/{sid}/{token}.yaml
+    Sub-->>H: Clash 节点配置 YAML (≈38KB)
+
+    Note over H: 存入内存，等待手机请求
+
+    P->>H: GET /sub.yaml
+    H-->>P: 返回最新节点配置
+
+    Note over P: Shadowrocket 自动更新节点 ✅
+</pre>
+</div>
+
+<div class="section-title">📊 对比：手动 vs 自动</div>
+<div class="diagram">
+<pre class="mermaid">
+graph LR
+    subgraph BEFORE["😵 以前 · 每天手动"]
+        direction TB
+        B1["打开网站"] --> B2["注册新账号"]
+        B2 --> B3["输入验证码"]
+        B3 --> B4["点击领取"]
+        B4 --> B5["复制订阅链接"]
+        B5 --> B6["打开手机 App"]
+        B6 --> B7["粘贴配置"]
+        B7 --> B8["×365天 🤯"]
+    end
+
+    subgraph AFTER["😎 现在 · 全自动"]
+        direction TB
+        A1["Mac 开机"] --> A2["hidexx serve 自动启动"]
+        A2 --> A3["自动注册+OCR+领取"]
+        A3 --> A4["HTTP 分发配置"]
+        A4 --> A5["手机自动拉取"]
+        A5 --> A6["人工操作 = 0 🎉"]
+    end
+
+    style BEFORE fill:#1a1e24,stroke:#f97583,stroke-width:2px,color:#e6edf3
+    style AFTER fill:#1a1e24,stroke:#56d364,stroke-width:2px,color:#e6edf3
+    style B8 fill:#3d1f1f,stroke:#f97583,color:#f97583
+    style A6 fill:#1a3a1a,stroke:#56d364,color:#56d364
+</pre>
+</div>
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    darkMode: true,
+    background: '#0d1117',
+    primaryColor: '#21262d',
+    primaryTextColor: '#e6edf3',
+    primaryBorderColor: '#58a6ff',
+    lineColor: '#8b949e',
+    secondaryColor: '#161b22',
+    tertiaryColor: '#1a1e24',
+    noteBkgColor: '#161b22',
+    noteTextColor: '#e6edf3',
+    noteBorderColor: '#30363d',
+    actorBkg: '#21262d',
+    actorTextColor: '#e6edf3',
+    actorBorder: '#58a6ff',
+    signalColor: '#8b949e',
+    labelBoxBkgColor: '#21262d',
+    labelBoxBorderColor: '#30363d',
+    labelTextColor: '#e6edf3',
+  },
+  flowchart: { curve: 'basis', padding: 20 },
+  sequence: { mirrorActors: false, messageMargin: 40 }
+});
+</script>
+
+</body>
+</html>

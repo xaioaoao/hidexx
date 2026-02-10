@@ -1,0 +1,44 @@
+sequenceDiagram
+    participant T as ⏰ 定时器
+    participant H as 🖥️ hidexx
+    participant S as ☁️ hidexx.com
+    participant O as 🔍 tesseract
+    participant Sub as ☁️ 订阅服务
+    participant P as 📱 手机
+
+    T->>H: 触发 (每20h)
+
+    Note over H: 生成随机邮箱+密码
+
+    H->>S: GET /users/vcode
+    S-->>H: 验证码图片 (PNG)
+
+    H->>O: OCR 识别
+    O-->>H: "T4K6" (4位字符)
+
+    alt OCR 结果不是4位
+        H->>S: 重新 GET /users/vcode
+        Note over H,O: 重试 最多10次
+    end
+
+    H->>S: POST /users/register
+    S-->>H: 302 注册成功 自动登录
+
+    H->>S: GET /users/ucenter
+    S-->>H: HTML 含 sid + checksum
+
+    H->>S: POST /orders/request_day_trial
+    S-->>H: 领取成功!
+
+    H->>S: GET /users/ucenter
+    S-->>H: HTML 含订阅URL
+
+    H->>Sub: GET 订阅YAML
+    Sub-->>H: Clash 节点配置 ≈38KB
+
+    Note over H: 存入内存 等待手机请求
+
+    P->>H: GET /sub.yaml
+    H-->>P: 返回最新节点配置
+
+    Note over P: Shadowrocket 自动更新节点 ✅

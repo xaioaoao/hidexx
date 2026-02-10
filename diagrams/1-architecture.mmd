@@ -1,0 +1,29 @@
+graph TB
+    subgraph HIDEXX["🖥️ Mac · hidexx serve :51991"]
+        direction TB
+        CRON["⏰ 定时器\n每 20 小时触发"]
+        REG["📝 注册模块\n随机邮箱 + 密码"]
+        OCR["🔍 OCR 模块\ntesseract 识别验证码\n失败自动重试"]
+        CLAIM["🎁 领取模块\n解析 sid/checksum\nPOST 领取免费试用"]
+        FETCH["📥 订阅拉取\n下载 Clash YAML ≈38KB"]
+        STORE["💾 内存存储\n最新节点配置"]
+        HTTP["🌐 HTTP Server\nGET /sub.yaml"]
+
+        CRON --> REG --> OCR --> CLAIM --> FETCH --> STORE --> HTTP
+    end
+
+    SITE["☁️ a.hidexx.com\n代理节点提供商"]
+    SUB_SITE["☁️ sub.51trojan.com\n订阅配置服务"]
+
+    REG -- "POST /users/register" --> SITE
+    OCR -- "GET /users/vcode" --> SITE
+    CLAIM -- "POST /orders/request_day_trial" --> SITE
+    FETCH -- "GET /v1/sub/.../xxx.yaml" --> SUB_SITE
+
+    IPHONE["📱 iPhone\nShadowrocket"]
+    IPAD["📱 iPad\nClash"]
+    FRIEND["📱 朋友的手机\n任意客户端"]
+
+    HTTP -- "http://192.168.x.x:51991/sub.yaml" --> IPHONE
+    HTTP -- "同一 WiFi" --> IPAD
+    HTTP -- "同一 WiFi" --> FRIEND
