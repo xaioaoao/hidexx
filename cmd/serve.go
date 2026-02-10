@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -20,68 +21,109 @@ var serveCmd = &cobra.Command{
 }
 
 func init() {
-	serveCmd.Flags().StringP("port", "p", "9191", "HTTP server listen port")
+	serveCmd.Flags().StringP("port", "p", "51991", "HTTP server listen port")
 	serveCmd.Flags().String("line", "1", `line_id: "1" for 王者套餐, "11" for 青铜套餐`)
+	serveCmd.Flags().IntP("users", "n", 1, "number of users (each gets an independent subscription)")
 
 	rootCmd.AddCommand(serveCmd)
 }
 
 type subStore struct {
-	mu   sync.RWMutex
-	yaml []byte
+	mu    sync.RWMutex
+	slots [][]byte // slots[0] = user 1, slots[1] = user 2, ...
 }
 
-func (s *subStore) Set(data []byte) {
+func newSubStore(n int) *subStore {
+	return &subStore{slots: make([][]byte, n)}
+}
+
+func (s *subStore) Set(index int, data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.yaml = data
+	s.slots[index] = data
 }
 
-func (s *subStore) Get() []byte {
+func (s *subStore) Get(index int) []byte {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.yaml
+	if index < 0 || index >= len(s.slots) {
+		return nil
+	}
+	return s.slots[index]
+}
+
+func (s *subStore) Len() int {
+	return len(s.slots)
 }
 
 func runServe(cmd *cobra.Command, args []string) {
 	port, _ := cmd.Flags().GetString("port")
 	lineID, _ := cmd.Flags().GetString("line")
-
-	store := &subStore{}
-
-	// 启动时立即执行一次
-	if err := refreshSubscription(store, lineID); err != nil {
-		log.Printf("initial refresh failed: %v", err)
-		log.Println("will retry in 1 hour...")
+	numUsers, _ := cmd.Flags().GetInt("users")
+	if numUsers < 1 {
+		numUsers = 1
 	}
+
+	store := newSubStore(numUsers)
+
+	// 启动时立即执行
+	refreshAll(store, lineID)
 
 	// 后台定时刷新
 	go func() {
-		// 首次失败则 1 小时后重试，之后每 20 小时刷新（留余量，避免正好 24 小时过期）
 		retryInterval := 1 * time.Hour
 		normalInterval := 20 * time.Hour
 
 		interval := normalInterval
-		if store.Get() == nil {
-			interval = retryInterval
+		// 如果有任何 slot 为空，缩短重试间隔
+		for i := 0; i < store.Len(); i++ {
+			if store.Get(i) == nil {
+				interval = retryInterval
+				break
+			}
 		}
 
 		for {
 			time.Sleep(interval)
-			if err := refreshSubscription(store, lineID); err != nil {
-				log.Printf("refresh failed: %v", err)
-				interval = retryInterval
-			} else {
-				interval = normalInterval
+			refreshAll(store, lineID)
+
+			interval = normalInterval
+			for i := 0; i < store.Len(); i++ {
+				if store.Get(i) == nil {
+					interval = retryInterval
+					break
+				}
 			}
 		}
 	}()
 
 	// HTTP 服务
 	mux := http.NewServeMux()
+
+	// 每个用户一个独立 endpoint: /1/sub.yaml, /2/sub.yaml, ...
+	for i := 0; i < numUsers; i++ {
+		idx := i
+		userID := i + 1
+		path := fmt.Sprintf("/%d/sub.yaml", userID)
+
+		mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			log.Printf("[access] %s %s from %s - UA: %s", r.Method, r.URL.Path, r.RemoteAddr, r.UserAgent())
+			data := store.Get(idx)
+			if data == nil {
+				http.Error(w, "subscription not ready yet, try again later", http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=hidexx-%d.yaml", userID))
+			w.Write(data)
+			log.Printf("[access] served %d bytes to %s (user %d)", len(data), r.RemoteAddr, userID)
+		})
+	}
+
+	// 兼容旧的单用户路径，指向 user 1
 	mux.HandleFunc("/sub.yaml", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[access] %s %s from %s - UA: %s", r.Method, r.URL.Path, r.RemoteAddr, r.UserAgent())
-		data := store.Get()
+		data := store.Get(0)
 		if data == nil {
 			http.Error(w, "subscription not ready yet, try again later", http.StatusServiceUnavailable)
 			return
@@ -89,16 +131,21 @@ func runServe(cmd *cobra.Command, args []string) {
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 		w.Header().Set("Content-Disposition", "attachment; filename=hidexx.yaml")
 		w.Write(data)
-		log.Printf("[access] served %d bytes to %s", len(data), r.RemoteAddr)
 	})
+
+	// 状态页
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[access] %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
-		data := store.Get()
-		status := "not ready"
-		if data != nil {
-			status = fmt.Sprintf("OK (%d bytes)", len(data))
+		fmt.Fprintln(w, "hidexx subscription server")
+		fmt.Fprintf(w, "users: %d\n\n", numUsers)
+		for i := 0; i < numUsers; i++ {
+			data := store.Get(i)
+			status := "not ready"
+			if data != nil {
+				status = fmt.Sprintf("OK (%d bytes)", len(data))
+			}
+			fmt.Fprintf(w, "  user %d: %s  ->  /%d/sub.yaml\n", i+1, status, i+1)
 		}
-		fmt.Fprintf(w, "hidexx subscription server\nstatus: %s\nendpoint: /sub.yaml\n", status)
 	})
 
 	localIP := getLocalIP()
@@ -106,12 +153,12 @@ func runServe(cmd *cobra.Command, args []string) {
 	fmt.Println("=== hidexx subscription server ===")
 	fmt.Println()
 	fmt.Printf("listening on %s\n", addr)
+	fmt.Printf("users: %d\n", numUsers)
 	fmt.Println()
-	fmt.Println("Shadowrocket config (one-time setup):")
-	fmt.Printf("  URL: http://%s:%s/sub.yaml\n", localIP, port)
-	fmt.Println()
-	fmt.Println("  Shadowrocket -> bottom tab 'Config' -> '+' (top right)")
-	fmt.Println("  -> paste the URL above -> Download -> Done")
+	fmt.Println("subscription URLs (one per person, configure once):")
+	for i := 0; i < numUsers; i++ {
+		fmt.Printf("  user %d: http://%s:%s/%d/sub.yaml\n", i+1, localIP, port, i+1)
+	}
 	fmt.Println()
 	fmt.Println("subscription will auto-renew every ~20 hours.")
 
@@ -121,30 +168,42 @@ func runServe(cmd *cobra.Command, args []string) {
 	}
 }
 
-func refreshSubscription(store *subStore, lineID string) error {
-	log.Println("[refresh] starting daily renewal...")
+func refreshAll(store *subStore, lineID string) {
+	for i := 0; i < store.Len(); i++ {
+		userID := i + 1
+		log.Printf("[user %d] starting daily renewal...", userID)
+		if err := refreshOne(store, i, lineID); err != nil {
+			log.Printf("[user %d] refresh failed: %v", userID, err)
+		}
+		// 两个注册间隔几秒，避免被限流
+		if i < store.Len()-1 {
+			time.Sleep(5 * time.Second)
+		}
+	}
+}
+
+func refreshOne(store *subStore, index int, lineID string) error {
+	userID := index + 1
+	tag := "[user " + strconv.Itoa(userID) + "]"
 
 	c, err := client.New("https://a.hidexx.com")
 	if err != nil {
 		return fmt.Errorf("create client: %w", err)
 	}
 
-	// 注册
 	email, password := client.GenerateRandomAccount()
-	log.Printf("[refresh] registering %s ...", email)
+	log.Printf("%s registering %s ...", tag, email)
 	if err := c.Register(email, password); err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
-	log.Println("[refresh] register success")
+	log.Printf("%s register success", tag)
 
-	// 领取
-	log.Println("[refresh] claiming free trial ...")
+	log.Printf("%s claiming free trial ...", tag)
 	if err := c.ClaimFreeTrial(lineID); err != nil {
 		return fmt.Errorf("claim: %w", err)
 	}
-	log.Println("[refresh] claim success")
+	log.Printf("%s claim success", tag)
 
-	// 获取订阅链接
 	subs, err := c.GetSubscriptions()
 	if err != nil {
 		return fmt.Errorf("get subscriptions: %w", err)
@@ -153,16 +212,15 @@ func refreshSubscription(store *subStore, lineID string) error {
 		return fmt.Errorf("no subscription links found")
 	}
 
-	// 下载第一个订阅 YAML
 	subURL := subs[0].URL
-	log.Printf("[refresh] downloading subscription: %s", subURL)
+	log.Printf("%s downloading subscription: %s", tag, subURL)
 	data, err := client.DownloadSubscriptionYAML(subURL)
 	if err != nil {
 		return fmt.Errorf("download yaml: %w", err)
 	}
 
-	store.Set(data)
-	log.Printf("[refresh] done! serving %d bytes. account: %s", len(data), email)
+	store.Set(index, data)
+	log.Printf("%s done! serving %d bytes. account: %s / %s", tag, len(data), email, password)
 	return nil
 }
 
