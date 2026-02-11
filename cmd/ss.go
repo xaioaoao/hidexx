@@ -3,10 +3,13 @@ package cmd
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/shadowsocks/go-shadowsocks2/core"
@@ -37,9 +40,9 @@ func runSS(cmd *cobra.Command, args []string) {
 	fmt.Println("=== hidexx Shadowsocks server ===")
 	fmt.Println()
 
-	localIP := getOutboundIP()
+	localIP := getPublicIP()
 
-	passwords := generatePasswords(numUsers)
+	passwords := loadOrGeneratePasswords(numUsers)
 
 	// Shadowrocket 用的 method 名
 	ssMethod := "aes-256-gcm"
@@ -173,12 +176,32 @@ func getPublicIP() string {
 	return getOutboundIP()
 }
 
-func generatePasswords(n int) []string {
+const passwordFile = "/etc/hidexx/passwords.json"
+
+func loadOrGeneratePasswords(n int) []string {
+	// try load from file
+	if data, err := os.ReadFile(passwordFile); err == nil {
+		var pws []string
+		if json.Unmarshal(data, &pws) == nil && len(pws) >= n {
+			log.Printf("loaded %d passwords from %s", n, passwordFile)
+			return pws[:n]
+		}
+	}
+
+	// generate new
 	pws := make([]string, n)
 	for i := range pws {
 		b := make([]byte, 32)
 		rand.Read(b)
 		pws[i] = base64.StdEncoding.EncodeToString(b)
 	}
+
+	// save to file
+	os.MkdirAll(filepath.Dir(passwordFile), 0755)
+	if data, err := json.Marshal(pws); err == nil {
+		os.WriteFile(passwordFile, data, 0600)
+		log.Printf("saved %d passwords to %s", n, passwordFile)
+	}
+
 	return pws
 }
