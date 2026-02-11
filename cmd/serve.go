@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -71,29 +70,10 @@ func runServe(cmd *cobra.Command, args []string) {
 
 	// 后台定时刷新
 	go func() {
-		retryInterval := 1 * time.Hour
-		normalInterval := 20 * time.Hour
-
-		interval := normalInterval
-		// 如果有任何 slot 为空，缩短重试间隔
-		for i := 0; i < store.Len(); i++ {
-			if store.Get(i) == nil {
-				interval = retryInterval
-				break
-			}
-		}
-
 		for {
+			interval := nextRefreshInterval(store)
 			time.Sleep(interval)
 			refreshAll(store, lineID)
-
-			interval = normalInterval
-			for i := 0; i < store.Len(); i++ {
-				if store.Get(i) == nil {
-					interval = retryInterval
-					break
-				}
-			}
 		}
 	}()
 
@@ -173,13 +153,21 @@ func refreshAll(store *subStore, lineID string) {
 		userID := i + 1
 		log.Printf("[user %d] starting daily renewal...", userID)
 		if err := refreshOne(store, i, lineID); err != nil {
-			log.Printf("[user %d] refresh failed: %v", userID, err)
+			log.Printf("[user %d] refresh failed: %v, will retry next cycle", userID, err)
 		}
-		// 两个注册间隔几秒，避免被限流
 		if i < store.Len()-1 {
 			time.Sleep(5 * time.Second)
 		}
 	}
+}
+
+func nextRefreshInterval(store *subStore) time.Duration {
+	for i := 0; i < store.Len(); i++ {
+		if store.Get(i) == nil {
+			return 1 * time.Hour
+		}
+	}
+	return 20 * time.Hour
 }
 
 func refreshOne(store *subStore, index int, lineID string) error {
@@ -202,7 +190,7 @@ func refreshOne(store *subStore, index int, lineID string) error {
 	if err := c.ClaimFreeTrial(lineID); err != nil {
 		return fmt.Errorf("claim: %w", err)
 	}
-	log.Printf("%s claim success, waiting 10s for subscription to be provisioned...", tag)
+	log.Printf("%s claim success, waiting 10s for provisioning...", tag)
 	time.Sleep(10 * time.Second)
 
 	subs, err := c.GetSubscriptions()
@@ -223,17 +211,4 @@ func refreshOne(store *subStore, index int, lineID string) error {
 	store.Set(index, data)
 	log.Printf("%s done! serving %d bytes. account: %s / %s", tag, len(data), email, password)
 	return nil
-}
-
-func getLocalIP() string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return "127.0.0.1"
-	}
-	for _, addr := range addrs {
-		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
-			return ipNet.IP.String()
-		}
-	}
-	return "127.0.0.1"
 }

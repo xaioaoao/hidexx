@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/shadowsocks/go-shadowsocks2/core"
 	"github.com/shadowsocks/go-shadowsocks2/socks"
@@ -40,11 +41,9 @@ func runSS(cmd *cobra.Command, args []string) {
 	fmt.Println("=== hidexx Shadowsocks server ===")
 	fmt.Println()
 
-	localIP := getPublicIP()
-
+	publicIP := getPublicIP()
 	passwords := loadOrGeneratePasswords(numUsers)
 
-	// Shadowrocket 用的 method 名
 	ssMethod := "aes-256-gcm"
 
 	for i := 0; i < numUsers; i++ {
@@ -53,19 +52,17 @@ func runSS(cmd *cobra.Command, args []string) {
 		pw := passwords[i]
 		go startSS(port, userID, method, pw)
 
-		// 生成 ss:// 一键导入链接
 		raw := fmt.Sprintf("%s:%s", ssMethod, pw)
 		encoded := base64.StdEncoding.EncodeToString([]byte(raw))
-		ssURL := fmt.Sprintf("ss://%s@%s:%d#hidexx-user%d", encoded, localIP, port, userID)
+		ssURL := fmt.Sprintf("ss://%s@%s:%d#hidexx-user%d", encoded, publicIP, port, userID)
 
 		fmt.Printf("  user %d:\n", userID)
 		fmt.Printf("    one-click URL: %s\n", ssURL)
 		fmt.Println()
 	}
 
-	// 启动 HTTP 服务，提供 Clash YAML 订阅
+	// Clash YAML HTTP 服务
 	httpPort, _ := cmd.Flags().GetString("http")
-	publicIP := getPublicIP()
 
 	mux := http.NewServeMux()
 	for i := 0; i < numUsers; i++ {
@@ -108,7 +105,9 @@ rules:
 	go func() {
 		addr := "0.0.0.0:" + httpPort
 		log.Printf("Clash subscription HTTP server on %s", addr)
-		http.ListenAndServe(addr, mux)
+		if err := http.ListenAndServe(addr, mux); err != nil {
+			log.Fatalf("Clash HTTP server failed: %v", err)
+		}
 	}()
 
 	fmt.Println("Clash subscription URLs (for Android Clash):")
@@ -140,68 +139,78 @@ func startSS(port, userID int, method, password string) {
 			log.Printf("[user %d] accept: %v", userID, err)
 			continue
 		}
-		go func() {
-			defer conn.Close()
-			ssConn := ciph.StreamConn(conn)
-			tgt, err := socks.ReadAddr(ssConn)
-			if err != nil {
-				return
-			}
-			remote, err := net.Dial("tcp", tgt.String())
-			if err != nil {
-				return
-			}
-			defer remote.Close()
-
-			done := make(chan struct{}, 2)
-			go func() { relay(remote, ssConn); done <- struct{}{} }()
-			go func() { relay(ssConn, remote); done <- struct{}{} }()
-			<-done
-		}()
+		go handleSS(conn, ciph)
 	}
 }
 
-func getPublicIP() string {
-	resp, err := http.Get("https://api.ipify.org")
+func handleSS(conn net.Conn, ciph core.Cipher) {
+	defer conn.Close()
+
+	ssConn := ciph.StreamConn(conn)
+	tgt, err := socks.ReadAddr(ssConn)
 	if err != nil {
-		return getOutboundIP()
+		return
 	}
-	defer resp.Body.Close()
-	b := make([]byte, 64)
-	n, _ := resp.Body.Read(b)
-	ip := string(b[:n])
-	if net.ParseIP(ip) != nil {
-		return ip
+
+	remote, err := net.DialTimeout("tcp", tgt.String(), 10*time.Second)
+	if err != nil {
+		return
 	}
-	return getOutboundIP()
+	defer remote.Close()
+
+	bidirectionalRelayRW(conn, ssConn, remote)
 }
+
+// --- password persistence ---
 
 const passwordFile = "/etc/hidexx/passwords.json"
 
 func loadOrGeneratePasswords(n int) []string {
-	// try load from file
+	// 尝试从文件加载
 	if data, err := os.ReadFile(passwordFile); err == nil {
-		var pws []string
-		if json.Unmarshal(data, &pws) == nil && len(pws) >= n {
-			log.Printf("loaded %d passwords from %s", n, passwordFile)
-			return pws[:n]
+		var existing []string
+		if json.Unmarshal(data, &existing) == nil {
+			if len(existing) >= n {
+				log.Printf("loaded %d passwords from %s", n, passwordFile)
+				return existing[:n]
+			}
+			// 已有密码不够，保留已有的，追加新的
+			log.Printf("loaded %d passwords, generating %d more", len(existing), n-len(existing))
+			for len(existing) < n {
+				existing = append(existing, generatePassword())
+			}
+			savePasswords(existing)
+			return existing
 		}
 	}
 
-	// generate new
+	// 全新生成
 	pws := make([]string, n)
 	for i := range pws {
-		b := make([]byte, 32)
-		rand.Read(b)
-		pws[i] = base64.StdEncoding.EncodeToString(b)
+		pws[i] = generatePassword()
 	}
-
-	// save to file
-	os.MkdirAll(filepath.Dir(passwordFile), 0755)
-	if data, err := json.Marshal(pws); err == nil {
-		os.WriteFile(passwordFile, data, 0600)
-		log.Printf("saved %d passwords to %s", n, passwordFile)
-	}
-
+	savePasswords(pws)
 	return pws
+}
+
+func generatePassword() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("rand.Read failed: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+func savePasswords(pws []string) {
+	os.MkdirAll(filepath.Dir(passwordFile), 0755)
+	data, err := json.Marshal(pws)
+	if err != nil {
+		log.Printf("marshal passwords failed: %v", err)
+		return
+	}
+	if err := os.WriteFile(passwordFile, data, 0600); err != nil {
+		log.Printf("save passwords failed: %v", err)
+		return
+	}
+	log.Printf("saved %d passwords to %s", len(pws), passwordFile)
 }

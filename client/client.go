@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Client wraps an HTTP client with session (cookie) management for hidexx.
@@ -30,7 +32,8 @@ func New(baseURL string) (*Client, error) {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		HTTPClient: &http.Client{
-			Jar: jar,
+			Jar:     jar,
+			Timeout: 30 * time.Second,
 		},
 	}, nil
 }
@@ -155,19 +158,26 @@ func (c *Client) solveCaptcha() (string, error) {
 	}
 	tmpFile.Close()
 
-	// 调用 tesseract OCR
-	out, err := exec.Command("tesseract", tmpPath, "stdout").CombinedOutput()
+	// 调用 tesseract OCR（10s 超时）
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tesseract", tmpPath, "stdout").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("tesseract: %w (output: %s)", err, string(out))
 	}
 
 	code := strings.TrimSpace(string(out))
-	// 去除空格
 	code = strings.ReplaceAll(code, " ", "")
 
-	// 验证码必须是 4 位
 	if len(code) != 4 {
 		return "", fmt.Errorf("OCR result '%s' is not 4 chars", code)
+	}
+
+	// 验证码只含字母和数字
+	for _, ch := range code {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) {
+			return "", fmt.Errorf("OCR result '%s' contains invalid char", code)
+		}
 	}
 
 	return code, nil
@@ -283,7 +293,8 @@ func (c *Client) GetSubscriptions() ([]Subscription, error) {
 
 // DownloadSubscriptionYAML downloads the YAML content from a subscription URL.
 func DownloadSubscriptionYAML(subURL string) ([]byte, error) {
-	resp, err := http.Get(subURL)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(subURL)
 	if err != nil {
 		return nil, fmt.Errorf("download subscription: %w", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -29,26 +30,22 @@ func runProxy(cmd *cobra.Command, args []string) {
 	fmt.Println("=== hidexx SOCKS5 proxy server ===")
 	fmt.Println()
 
-	localIP := getOutboundIP()
+	ip := getPublicIP()
 
 	for i := 0; i < numUsers; i++ {
 		port := basePort + i
 		userID := i + 1
 		go startSOCKS5(port, userID)
-		fmt.Printf("  user %d: %s:%d\n", userID, localIP, port)
+		fmt.Printf("  user %d: %s:%d\n", userID, ip, port)
 	}
 
 	fmt.Println()
-	fmt.Println("Shadowrocket config:")
-	fmt.Println("  Type: SOCKS5")
-	fmt.Printf("  Address: %s\n", localIP)
-	fmt.Println("  Port: (see above)")
-	fmt.Println()
 	fmt.Println("proxy server running...")
 
-	// block forever
 	select {}
 }
+
+const socks5HandshakeTimeout = 10 * time.Second
 
 func startSOCKS5(port, userID int) {
 	addr := "0.0.0.0:" + strconv.Itoa(port)
@@ -64,14 +61,15 @@ func startSOCKS5(port, userID int) {
 			log.Printf("[user %d] accept: %v", userID, err)
 			continue
 		}
-		go handleSOCKS5(conn, userID)
+		go handleSOCKS5(conn)
 	}
 }
 
-func handleSOCKS5(conn net.Conn, userID int) {
+func handleSOCKS5(conn net.Conn) {
 	defer conn.Close()
 
-	// SOCKS5 handshake
+	conn.SetDeadline(time.Now().Add(socks5HandshakeTimeout))
+
 	buf := make([]byte, 256)
 
 	// 1. greeting
@@ -79,7 +77,6 @@ func handleSOCKS5(conn net.Conn, userID int) {
 	if err != nil || n < 2 || buf[0] != 0x05 {
 		return
 	}
-	// no auth required
 	conn.Write([]byte{0x05, 0x00})
 
 	// 2. request
@@ -99,7 +96,7 @@ func handleSOCKS5(conn net.Conn, userID int) {
 		targetAddr = fmt.Sprintf("%d.%d.%d.%d:%d", buf[4], buf[5], buf[6], buf[7], int(buf[8])<<8|int(buf[9]))
 	case 0x03: // domain
 		domainLen := int(buf[4])
-		if n < 5+domainLen+2 {
+		if domainLen == 0 || domainLen > 253 || n < 5+domainLen+2 {
 			return
 		}
 		domain := string(buf[5 : 5+domainLen])
@@ -118,49 +115,16 @@ func handleSOCKS5(conn net.Conn, userID int) {
 	}
 
 	// connect to target
-	remote, err := net.Dial("tcp", targetAddr)
+	remote, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
 	if err != nil {
 		conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return
 	}
-	defer remote.Close()
 
-	// success reply
+	// success reply — clear handshake deadline
 	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	conn.SetDeadline(time.Time{})
 
-	// bidirectional relay
-	done := make(chan struct{}, 2)
-	go func() { relay(remote, conn); done <- struct{}{} }()
-	go func() { relay(conn, remote); done <- struct{}{} }()
-	<-done
-}
-
-func relay(dst, src net.Conn) {
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := src.Read(buf)
-		if n > 0 {
-			if _, wErr := dst.Write(buf[:n]); wErr != nil {
-				return
-			}
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
-func getOutboundIP() string {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		return getLocalIP()
-	}
-	defer conn.Close()
-	addr := conn.LocalAddr().(*net.UDPAddr)
-	return addr.IP.String()
-}
-
-func init() {
-	// ensure getLocalIP is available from serve.go
-	_ = getLocalIP
+	// relay with idle timeout, both directions auto-close
+	bidirectionalRelay(conn, remote)
 }
